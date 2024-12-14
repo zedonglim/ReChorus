@@ -62,7 +62,7 @@ def format_metric(result_dict: Dict[str, Any]) -> str:
 		for metric in np.sort(metrics):
 			name = '{}@{}'.format(metric, topk)
 			m = result_dict[name] if topk != 'All' else result_dict[metric]
-			if type(m) is float or type(m) is np.float or type(m) is np.float32 or type(m) is np.float64:
+			if isinstance(m, (float, np.float32, np.float64)):
 				format_str.append('{}:{:<.4f}'.format(name, m))
 			elif type(m) is int or type(m) is np.int or type(m) is np.int32 or type(m) is np.int64:
 				format_str.append('{}:{}'.format(name, m))
@@ -107,3 +107,63 @@ def non_increasing(lst: list) -> bool:
 def get_time():
 	return datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
 
+def process_user_data(user_meta, user_id):
+	"""
+    Extract user-specific features such as duration and total hours from the user_meta DataFrame.
+
+    Args:
+    - user_meta (DataFrame): DataFrame containing user metadata.
+    - user_id (int or str): The ID of the user to fetch data for.
+
+    Returns:
+    - duration (float): User's standardized duration in years.
+    - total_hours (float): User's calculated total hours.
+    """
+	# Ensure user_id is correctly used based on user_meta structure
+	if 'user_id' in user_meta.columns:
+		user_data = user_meta.loc[user_meta['user_id'] == user_id]
+	elif user_meta.index.name == 'user_id':
+		user_data = user_meta.loc[user_id]
+	else:
+		raise KeyError(f"User ID {user_id} not found in user_meta.")
+	if user_data.empty:
+		raise ValueError(f"No data found for user_id {user_id}.")
+
+	# Define mappings
+	duration_mapping = {1: 0.5, 2: 2, 3: 5, 4: 8, 5: 13, 6: 18, 7: 25}
+	frequency_mapping = {1: 0, 2: 2, 3: 4, 4: 6, 5: 7}
+	duration_per_session_mapping = {1: 30, 2: 60, 3: 90, 4: 120, 5: 150}
+
+	# Get user-specific metadata
+	user_data = user_data.iloc[0]
+
+	# Map numeric values to actual ranges
+	duration = duration_mapping.get(user_data['u_duration_years_c'], 0)  # Duration in years
+	frequency = frequency_mapping.get(user_data['u_exercise_frequency_c'], 0)  # Sessions per week
+	session_duration = duration_per_session_mapping.get(user_data['u_average_duration_c'], 0)  # Minutes per session
+
+	# Calculate total hours per week
+	total_hours = (frequency * session_duration) / 60  # Convert minutes to hours
+
+	return duration, total_hours
+
+def determine_skill_level(duration, total_hours):
+	"""
+	Determines the skill level based on duration and total hours.
+	Skill Levels (Zero-Based Indices):
+	0 - Beginner
+	1 - Proficient
+	2 - Advanced
+	3 - Expert
+	"""
+	if duration is None or total_hours is None:
+		return 0  # Beginner
+	if duration < 1:
+		return 0  # Beginner
+	elif 1 <= duration <= 3:
+		return 1  # Proficient
+	elif 3 < duration <= 5:
+		return 2 if total_hours >= 12 else 1  # Advanced or Proficient
+	elif duration > 5:
+		return 3 if total_hours > 12 else (2 if total_hours >= 12 else 1)  # Expert, Advanced, or Proficient
+	return 0  # Default to Beginner

@@ -15,6 +15,7 @@ from models.developing import *
 from models.context import *
 from models.context_seq import *
 from models.reranker import *
+from models.multi_task import *
 from utils import utils
 
 
@@ -148,6 +149,53 @@ def save_rec_results(dataset, runner, topk):
 		rec_df['neg_items'] = neg_items
 		rec_df['neg_predictions'] = neg_predictions
 		rec_df.to_csv(result_path, sep=args.sep, index=False)
+	elif init_args.model_mode in ['RankSkillTopK']:
+		logging.info('Saving top-{} and skill-level prediction results to: {}'.format(topk, result_path))
+		ranking_preds, skill_preds, skill_truths, rec_unseen_items, unseen_items_score = runner.predict(dataset)
+
+		users, rec_items, rec_predictions, rec_skills, user_skills = list(), list(), list(), list(), list()
+
+		for i in range(len(dataset)):
+			info = dataset[i]
+			user_id = info['user_id']
+			users.append(user_id)
+
+			# Process user metadata to compute skill level
+			duration, total_hours = utils.process_user_data(dataset.corpus.user_meta_df, user_id)
+			user_skill = utils.determine_skill_level(duration, total_hours)
+
+			# Sort items by ranking predictions
+			item_scores = zip(info['item_id'], ranking_preds[i], skill_preds[i])
+			sorted_lst = sorted(item_scores, key=lambda x: x[1], reverse=True)[:topk]
+			top_k_items, top_k_preds, top_k_skills = zip(*sorted_lst)
+
+			# Combine existing and unseen items, ensuring unique values
+			seen_items_set = set(top_k_items)  # Track items already in top_k_items
+			combined_rec_items, combined_rec_predictions = list(top_k_items), list(top_k_preds)
+
+			# Safely handle users with no unseen items
+			unseen_items = rec_unseen_items[i] if i < len(rec_unseen_items) and len(rec_unseen_items[i]) > 0 else []
+			unseen_scores = unseen_items_score[i] if i < len(unseen_items_score) and len(unseen_items_score[i]) > 0 else []
+
+			# Iterate over unseen items and their scores
+			for unseen_item, unseen_score in zip(unseen_items, unseen_scores):
+				if unseen_item not in seen_items_set:  # Add only if not in top_k_items
+					combined_rec_items.append(unseen_item)
+					combined_rec_predictions.append(unseen_score)
+
+			rec_items.append(combined_rec_items)
+			rec_predictions.append(combined_rec_predictions)
+			rec_skills.append(top_k_skills)
+			user_skills.append(user_skill)
+
+		rec_df = pd.DataFrame({
+			'user_id': users,
+			'rec_items': rec_items,
+			'rec_predictions': rec_predictions,
+			'rec_skills': rec_skills,
+			'user_skill': user_skills
+		})
+		rec_df.to_csv(result_path, sep=args.sep, index=False)
 	else:
 		return 0
 	logging.info("{} Prediction results saved!".format(dataset.phase))
@@ -160,7 +208,7 @@ if __name__ == '__main__':
             						for general/seq models to select Normal (no suffix, model_mode="") or "Impression" setting;\
                   					for rerankers to select "General" or "Sequential" Baseranker.')
 	init_args, init_extras = init_parser.parse_known_args()
-	
+
 	model_name = eval('{0}.{0}{1}'.format(init_args.model_name,init_args.model_mode))
 	reader_name = eval('{0}.{0}'.format(model_name.reader))  # model chooses the reader
 	runner_name = eval('{0}.{0}'.format(model_name.runner))  # model chooses the runner
