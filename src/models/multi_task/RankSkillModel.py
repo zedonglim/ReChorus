@@ -8,6 +8,7 @@ from utils import utils
 from torch.nn.utils.rnn import pad_sequence
 from typing import List
 from models.BaseModel import BaseModel
+from utils.layers import MLP_Block
 
 class RankSkillModel(BaseModel):
     reader, runner = 'RankSkillReader', 'RankSkillRunner'
@@ -19,6 +20,8 @@ class RankSkillModel(BaseModel):
 							help='Size of embedding vectors.')
         parser.add_argument('--loss_n',type=str,default='BPR',
 							help='Type of loss functions.')
+        parser.add_argument('--layers', type=str, default='[64]',
+							help="Size of each layer.")
         parser.add_argument('--dropout', type=float, default=0, help='Dropout probability for each deep layer.')
         parser.add_argument('--test_all', type=int, default=0, help='Whether testing on all items.')
         parser.add_argument('--skill_level_pred', type=int, default=1, help='Enable skill level prediction (1) or disable (0).')
@@ -66,17 +69,9 @@ class RankSkillModel(BaseModel):
         combined_user_emb = torch.cat([user_emb, skill_emb], dim=-1)  # Concatenate embeddings
         combined_user_emb = self.user_projection(combined_user_emb)  # Learnable projection layer
 
-        # combined_user_emb = user_emb + skill_emb
-        # # Add an extra dimension to broadcast combined_user_emb
-        # combined_user_emb = combined_user_emb.unsqueeze(1)  # Shape: [128, 1, 64]
-
-        # interaction_emb = combined_user_emb * item_emb
-
         interaction_emb = torch.bmm(item_emb, combined_user_emb.unsqueeze(-1)).squeeze(-1)
 
         ranking_score = interaction_emb
-        # skill_pred = self.skill_head(user_emb)
-        # Skill prediction: Include interaction context
         skill_input = torch.cat([user_emb, skill_emb], dim=-1)  # Concatenate embeddings
         skill_input = self.skill_projection(skill_input)  # Project to expected size: [batch_size, emb_size]
         skill_pred = self.skill_head(skill_input)  # Shape: [batch_size, num_skill_levels]
@@ -94,7 +89,6 @@ class RankSkillModel(BaseModel):
 
         BPR loss is used for ranking tasks, and CrossEntropy loss is used for skill-level prediction.
         """
-        # loss = None
 
         # Ranking loss: BPR or BCE, determined by self.loss_n
         if self.loss_n == 'BPR':
@@ -110,16 +104,6 @@ class RankSkillModel(BaseModel):
             ranking_loss = - (pos_pred.log() + (1 - neg_pred).log().sum(dim=1)).mean()
         else:
             raise ValueError(f'Undefined loss function: {self.loss_n}')
-
-        # # Skill-level prediction loss: CrossEntropyLoss
-        # skill_loss = nn.CrossEntropyLoss()(out_dict['skill_pred'], out_dict['skill_truth'])
-
-        # # Combine the losses using weights (lambda1 for ranking, lambda2 for skill prediction)
-        # loss = self.args.lambda1 * ranking_loss + self.args.lambda2 * skill_loss
-
-        # # Check for NaN or Inf in the loss
-        # if torch.isnan(loss) or torch.isinf(loss):
-        #     print('Error: NaN or Inf detected in loss!')
 
         return ranking_loss
 
