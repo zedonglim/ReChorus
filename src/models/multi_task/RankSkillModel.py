@@ -39,13 +39,27 @@ class RankSkillModel(BaseModel):
         self.dropout = args.dropout
         self.loss_n = args.loss_n
         self.test_all = args.test_all
+        self.layers = args.layers
 
         # Embedding layers for users and items
         self.user_embeddings = nn.Embedding(self.user_num, args.emb_size)
         self.item_embeddings = nn.Embedding(self.item_num, args.emb_size)
         self.skill_embeddings = nn.Embedding(self.skill_level_num + 1, args.emb_size)  # Skill level embeddings
-        self.user_projection = nn.Linear(args.emb_size * 2, args.emb_size)
-        self.skill_projection = nn.Linear(args.emb_size * 2, args.emb_size)
+        
+        # MLP Layers for interaction and skill prediction
+        self.mlp_interaction = MLP_Block(
+            input_dim=args.emb_size * 2,  # Concatenation of user and item embeddings
+            hidden_units=eval(self.layers),  # Hidden layer sizes from config
+            dropout_rates=self.dropout,
+            output_dim=1  # Final score for ranking
+        )
+
+        self.mlp_skill = MLP_Block(
+            input_dim=args.emb_size * 2,  # Concatenation of user and skill embeddings
+            hidden_units=eval(self.layers),
+            dropout_rates=self.dropout,
+            output_dim=self.skill_level_num  # Skill level probabilities
+        )
 
         # Task-specific heads
         self.ranking_head = nn.Linear(args.emb_size, 1)  # Task 1: Ranking
@@ -65,19 +79,17 @@ class RankSkillModel(BaseModel):
         item_emb = self.item_embeddings(i_ids)
         skill_emb = self.skill_embeddings(user_skill_level)
 
-        # Project user and skill embeddings to a common space
-        combined_user_emb = torch.cat([user_emb, skill_emb], dim=-1)  # Concatenate embeddings
-        combined_user_emb = self.user_projection(combined_user_emb)  # Learnable projection layer
+        # Ranking interaction
+        interaction_input = torch.cat([user_emb.unsqueeze(1).expand_as(item_emb), item_emb], dim=-1)
+        interaction_score = self.mlp_interaction(interaction_input).squeeze(-1)  # Shape: [batch_size, num_items]
 
-        interaction_emb = torch.bmm(item_emb, combined_user_emb.unsqueeze(-1)).squeeze(-1)
+        # Skill prediction
+        skill_input = torch.cat([user_emb, skill_emb], dim=-1)  # Shape: [batch_size, emb_size * 2]
+        skill_pred = self.mlp_skill(skill_input)  # Shape: [batch_size, num_skill_levels]
 
-        ranking_score = interaction_emb
-        skill_input = torch.cat([user_emb, skill_emb], dim=-1)  # Concatenate embeddings
-        skill_input = self.skill_projection(skill_input)  # Project to expected size: [batch_size, emb_size]
-        skill_pred = self.skill_head(skill_input)  # Shape: [batch_size, num_skill_levels]
 
         out_dict = {
-            'prediction': ranking_score,  # Task 1 output
+            'prediction': interaction_score,  # Task 1 output
             'skill_pred': skill_pred,  # Task 2 output
             'skill_truth': skill_truth
         }
