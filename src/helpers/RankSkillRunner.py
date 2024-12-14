@@ -311,8 +311,6 @@ class RankSkillRunner:
         if unseen_items is not None and dataset.corpus.include_unseen_items:
             logging.info(f'Loaded {len(unseen_items)} unseen items for prediction.')
             unseen_items = unseen_items.copy()
-        else:
-            logging.warning('No unseen items found in dataset.corpus.unseen_items_df.')
 
         # Create a DataLoader for the dataset
         dl = DataLoader(dataset, batch_size=self.eval_batch_size, shuffle=False,
