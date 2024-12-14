@@ -202,14 +202,20 @@ class RankSkillRunner:
         - filtered_items: DataFrame with adjusted scores.
         """
         u_prefer_category = user_profile['u_prefer_exercises_sports_c']  # 1: Both, 2: Exercises, 3: Sports
+        u_interested_new_sports = user_profile.get('u_interested_new_sports_c', 0)  # Binary: 1 (Interested), 0 (Not Interested)
         unseen_items['adjusted_score'] = 1.0  # Initialize scores
 
         # Apply category preference adjustment
         for idx, row in unseen_items.iterrows():
             i_category = row['i_category_c']
+
+            # Apply category preference match
             if u_prefer_category != 1 and u_prefer_category != i_category:
                 unseen_items.at[idx, 'adjusted_score'] *= 0.8  # Slightly reduce score for mismatched categories
 
+            # Boost scores for users interested in exploring new activities
+            if u_interested_new_sports == 1:  # User is open to exploring
+                unseen_items.at[idx, 'adjusted_score'] *= 1.1  # Apply a 10% boost to all unseen items
         return unseen_items
 
     # Base Profile Scoring
