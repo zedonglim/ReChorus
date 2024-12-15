@@ -16,12 +16,10 @@ class RankSkillModel(BaseModel):
     @staticmethod
     def parse_model_args(parser):
         parser.add_argument('--num_neg', type=int, default=1, help='Number of negative samples during training.')
-        parser.add_argument('--emb_size', type=int, default=64,
-							help='Size of embedding vectors.')
-        parser.add_argument('--loss_n',type=str,default='BPR',
-							help='Type of loss functions.')
-        parser.add_argument('--layers', type=str, default='[64]',
-							help="Size of each layer.")
+        parser.add_argument('--emb_size', type=int, default=64, help='Size of embedding vectors.')
+        parser.add_argument('--kg_emb_size', type=int, default=64, help='Size of KG embeddings.')
+        parser.add_argument('--loss_n',type=str,default='BPR', help='Type of loss functions.')
+        parser.add_argument('--layers', type=str, default='[64]', help="Size of each layer.")
         parser.add_argument('--dropout', type=float, default=0, help='Dropout probability for each deep layer.')
         parser.add_argument('--test_all', type=int, default=0, help='Whether testing on all items.')
         parser.add_argument('--skill_level_pred', type=int, default=1, help='Enable skill level prediction (1) or disable (0).')
@@ -34,6 +32,8 @@ class RankSkillModel(BaseModel):
         self.args = args
         self.user_num = corpus.n_users
         self.item_num = corpus.n_items
+        self.relation_num = corpus.n_relations  # From Reader
+        self.entity_num = corpus.n_entities    # From Reader
         self.skill_level_num = 4  # Number of skill levels
         self.num_neg = args.num_neg
         self.dropout = args.dropout
@@ -41,15 +41,17 @@ class RankSkillModel(BaseModel):
         self.test_all = args.test_all
         self.layers = args.layers
 
-        # Embedding layers for users and items
+        # Embedding layers for users, items, and KG entities/relations
         self.user_embeddings = nn.Embedding(self.user_num, args.emb_size)
         self.item_embeddings = nn.Embedding(self.item_num, args.emb_size)
+        self.entity_embeddings = nn.Embedding(self.entity_num, args.kg_emb_size)
+        self.relation_embeddings = nn.Embedding(self.relation_num, args.kg_emb_size)
         self.skill_embeddings = nn.Embedding(self.skill_level_num + 1, args.emb_size)  # Skill level embeddings
         
         # MLP Layers for interaction and skill prediction
         self.mlp_interaction = MLP_Block(
-            input_dim=args.emb_size * 2,  # Concatenation of user and item embeddings
-            hidden_units=eval(self.layers),  # Hidden layer sizes from config
+            input_dim=args.emb_size * 2 + args.kg_emb_size,  # Concatenation of user, item, and KG embeddings
+            hidden_units=eval(self.layers),
             dropout_rates=self.dropout,
             output_dim=1  # Final score for ranking
         )
@@ -61,10 +63,6 @@ class RankSkillModel(BaseModel):
             output_dim=self.skill_level_num  # Skill level probabilities
         )
 
-        # Task-specific heads
-        self.ranking_head = nn.Linear(args.emb_size, 1)  # Task 1: Ranking
-        self.skill_head = nn.Linear(args.emb_size, self.skill_level_num)  # Task 2: Skill level
-
         self.init_weights(self)
 
     def forward(self, feed_dict):
@@ -74,14 +72,32 @@ class RankSkillModel(BaseModel):
         user_skill_level = feed_dict['skill_pred']
         skill_truth = feed_dict['skill_truth']
 
+        # KG-related IDs
+        kg_entities = feed_dict['kg_entities']  # List of connected entities
+        kg_relations = feed_dict['kg_relations']  # List of relation types
+
         # Shared embeddings
         user_emb = self.user_embeddings(u_ids)
         item_emb = self.item_embeddings(i_ids)
         skill_emb = self.skill_embeddings(user_skill_level)
 
+        # KG embeddings
+        if kg_entities.shape[1] > 1:  # Check if there are valid entities
+            kg_entity_emb = self.entity_embeddings(kg_entities).mean(dim=1)  # Aggregate entity embeddings
+        else:
+            kg_entity_emb = self.entity_embeddings(kg_entities).squeeze(1)  # Handle single entity
+
+        if kg_relations.shape[1] > 1:  # Check if there are valid relations
+            kg_relation_emb = self.relation_embeddings(kg_relations).mean(dim=1)  # Aggregate relation embeddings
+        else:
+            kg_relation_emb = self.relation_embeddings(kg_relations).squeeze(1)  # Handle single relation
+
+        kg_emb = kg_entity_emb + kg_relation_emb  # Combine KG embeddings
+
         # Ranking interaction
-        interaction_input = torch.cat([user_emb.unsqueeze(1).expand_as(item_emb), item_emb], dim=-1)
-        interaction_score = self.mlp_interaction(interaction_input).squeeze(-1)  # Shape: [batch_size, num_items]
+        kg_emb_expanded = kg_emb.unsqueeze(1).expand_as(item_emb)  # Shape: [batch_size, num_items, emb_size]
+        interaction_input = torch.cat([user_emb.unsqueeze(1).expand_as(item_emb), item_emb, kg_emb_expanded], dim=-1)
+        interaction_score = self.mlp_interaction(interaction_input).squeeze(-1)
 
         # Skill prediction
         skill_input = torch.cat([user_emb, skill_emb], dim=-1)  # Shape: [batch_size, emb_size * 2]
@@ -130,6 +146,10 @@ class RankSkillModel(BaseModel):
                 neg_items = self.data['neg_items'][index]
             item_ids = np.concatenate([[target_item], neg_items]).astype(int)
 
+            # KG-related IDs
+            kg_entities = self.corpus.kg_entity_map.get(target_item, [0])  # Use [0] if no connected entities
+            kg_relations = self.corpus.kg_relation_map.get(target_item, [0])  # Use [0] if no connected relations
+
             # Retrieve user skill level from user_meta
             # Perform an explicit lookup using .loc
             skill_truth = (self.corpus.user_meta_df.loc[self.corpus.user_meta_df['user_id'] == user_id, 'u_skill_level_c'].values[0] - 1)
@@ -144,6 +164,8 @@ class RankSkillModel(BaseModel):
                 'item_id': item_ids,
                 'skill_truth': skill_truth,  # Ground truth for skill level
                 'skill_pred': skill_pred,  # Dynamically computed
+                'kg_entities': torch.tensor(kg_entities, dtype=torch.long),
+                'kg_relations': torch.tensor(kg_relations, dtype=torch.long),
             }
             return feed_dict
 
@@ -169,18 +191,14 @@ class RankSkillModel(BaseModel):
             """
             feed_dict = dict()
             for key in feed_dicts[0]:
-                if isinstance(feed_dicts[0][key], np.ndarray):
-                    tmp_list = [len(d[key]) for d in feed_dicts]
-                    if any([tmp_list[0] != l for l in tmp_list]):
-                        stack_val = np.array([d[key] for d in feed_dicts], dtype=object)
-                    else:
-                        stack_val = np.array([d[key] for d in feed_dicts])
+                if key in ['kg_entities', 'kg_relations']:
+                    # Pad variable-length sequences
+                    list_tensors = [d[key].clone().detach() for d in feed_dicts]
+                    feed_dict[key] = pad_sequence(list_tensors, batch_first=True, padding_value=0)
+                elif isinstance(feed_dicts[0][key], torch.Tensor):
+                    feed_dict[key] = torch.stack([d[key] for d in feed_dicts])
                 else:
-                    stack_val = np.array([d[key] for d in feed_dicts])
-                if stack_val.dtype == object:  # Handle sequences with inconsistent lengths
-                    feed_dict[key] = pad_sequence([torch.tensor(x) for x in stack_val], batch_first=True)
-                else:
-                    feed_dict[key] = torch.tensor(stack_val)
+                    feed_dict[key] = torch.from_numpy(np.stack([d[key] for d in feed_dicts]))
 
             # Special handling for skill_truth, if present
             if 'skill_truth' in feed_dict:

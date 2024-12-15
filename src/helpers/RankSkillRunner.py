@@ -8,7 +8,7 @@ from tqdm import tqdm
 from torch.utils.data import DataLoader
 from typing import Dict, List
 from sklearn.metrics.pairwise import cosine_similarity
-
+from torch.nn.utils.rnn import pad_sequence
 from utils import utils
 from models.multi_task.RankSkillModel import RankSkillModel
 
@@ -140,6 +140,17 @@ class RankSkillRunner:
             item_ids = batch['item_id']
             indices = torch.argsort(torch.rand(*item_ids.shape), dim=-1)
             batch['item_id'] = item_ids[torch.arange(item_ids.shape[0]).unsqueeze(-1), indices]
+
+            # Handle variable-length KG data
+            target_items = batch['item_id'][:, 0]  # Positive target items
+            batch['kg_entities'] = pad_sequence(
+                [torch.tensor(dataset.corpus.kg_entity_map.get(item_id.item(), [0]), dtype=torch.long) for item_id in target_items],
+                batch_first=True, padding_value=0
+            )
+            batch['kg_relations'] = pad_sequence(
+                [torch.tensor(dataset.corpus.kg_relation_map.get(item_id.item(), [0]), dtype=torch.long) for item_id in target_items],
+                batch_first=True, padding_value=0
+            )
 
             model.optimizer.zero_grad()
             out_dict = model(batch)
@@ -307,7 +318,7 @@ class RankSkillRunner:
         """
         Predict both ranking scores and skill-level outputs for the given dataset.
         :param dataset: The dataset to evaluate.
-        :return: Tuple of (predictions, skill_predictions, skill_truths).
+        :return: Tuple of (predictions, skill_predictions, skill_truths, rec_unseen_items, unseen_items_score).
         """
         dataset.model.eval()  # Set the model to evaluation mode
         predictions, skill_predictions, skill_truths, rec_unseen_items, unseen_items_score = list(), list(), list(), list(), list()
@@ -327,6 +338,11 @@ class RankSkillRunner:
             # Move the batch to GPU if necessary
             batch = utils.batch_to_gpu(batch, dataset.model.device)
             
+            # Pad kg_entities and kg_relations to handle variable-length data
+            if 'kg_entities' in batch and 'kg_relations' in batch:
+                batch['kg_entities'] = pad_sequence(batch['kg_entities'], batch_first=True, padding_value=0)
+                batch['kg_relations'] = pad_sequence(batch['kg_relations'], batch_first=True, padding_value=0)
+
             # Forward pass through the model
             out_dict = dataset.model(batch)
             batch_predictions = out_dict['prediction'].cpu().data.numpy()
