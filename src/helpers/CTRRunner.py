@@ -65,6 +65,13 @@ class CTRRunner(BaseRunner):
 		dl = DataLoader(dataset, batch_size=self.eval_batch_size, shuffle=False, num_workers=self.num_workers,
 						collate_fn=dataset.collate_batch, pin_memory=self.pin_memory)
 		for batch in tqdm(dl, leave=False, ncols=100, mininterval=1, desc='Predict'):
+			if dataset.model.use_kg:
+				batch['kg_embedding'] = torch.stack([
+					torch.tensor(dataset.model.kg_embeddings[item_id], dtype=torch.float32) 
+					if item_id in dataset.model.kg_embeddings else torch.zeros(dataset.model.vec_size)
+					for item_id in batch['item_id']
+				]).to(dataset.model.device)
+
 			if hasattr(dataset.model,'inference'):
 				out_dict = dataset.model.inference(utils.batch_to_gpu(batch, dataset.model.device))
 				prediction, label = out_dict['prediction'], out_dict['label']
