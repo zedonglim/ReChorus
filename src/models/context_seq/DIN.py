@@ -45,11 +45,19 @@ class DINBase(object):
 		self.dnn_layers = eval(args.dnn_layers)
 		self.use_kg = args.use_kg
 
+		self._load_user_skill_level()
+
 		if self.use_kg:
 			self._load_kg_embeddings()
 
 		self._define_params_DIN()
 		self.apply(self.init_weights)
+
+	def _load_user_skill_level(self):
+		"""Load user skill level mapping."""
+		skill_level_path = 'C:/Users/User/ReChorus/data/k_fold_his_fav_train_int_dev_test/user_skill_level.csv'
+		skill_df = pd.read_csv(skill_level_path, sep='\t')
+		self.user_skill_mapping = skill_df.set_index('user_id').to_dict(orient='index')
 
 	def _load_kg_embeddings(self):
 		"""Load KG embeddings from precomputed file."""
@@ -58,12 +66,24 @@ class DINBase(object):
 		self.kg_embeddings.columns = ['entity_id'] + [f'emb_{i}' for i in range(self.vec_size)]
 		self.kg_embeddings = self.kg_embeddings.set_index('entity_id').to_dict(orient='index')
 
+	def preprocess_feed_dict(self, feed_dict):
+		"""Add skill_level and best_sport to feed_dict."""
+		feed_dict['skill_level'] = [
+			self.user_skill_mapping[user_id]['skill_level'] if user_id in self.user_skill_mapping else 0
+			for user_id in feed_dict['user_id']
+		]
+		feed_dict['best_sport'] = [
+			self.user_skill_mapping[user_id]['best_sport_id'] if user_id in self.user_skill_mapping else 0
+			for user_id in feed_dict['user_id']
+		]
+		return feed_dict
+
 	def _define_params_DIN(self):
 		self.embedding_dict = nn.ModuleDict()
 		for f in self.user_context + self.item_context + self.situation_context:
 			self.embedding_dict[f] = (
 				nn.Embedding(self.feature_max[f], self.vec_size)
-				if f.endswith('_c') or f.endswith('_id')
+				if f.endswith('_c') or f.endswith('_id') or f in ['skill_level', 'best_sport']
 				else nn.Linear(1, self.vec_size, bias=False)
 			)
 
@@ -78,12 +98,17 @@ class DINBase(object):
 			batch_norm=False
 		)
 
-		# DNN MLP Layer (Corrected pre_size)
-		pre_size = (
-			1856 +  # user_his_emb2d
-			1856 +  # user_his_emb2d * current_emb2d
-			7424    # all_context2d
-		)
+		if self.use_kg:
+			# DNN MLP Layer (Corrected pre_size)
+			pre_size = (
+				1856 +  # user_his_emb2d
+				1856 +  # user_his_emb2d * current_emb2d
+				7424    # all_context2d
+			)
+		else:
+			pre_size = (2*(self.item_feature_num+self.situation_feature_num)+self.item_feature_num
+              +len(self.situation_context) + self.user_feature_num) * self.vec_size
+
 		self.dnn_mlp_layers = MLP_Block(
 			input_dim=pre_size,
 			hidden_units=self.dnn_layers,
@@ -153,7 +178,7 @@ class DINBase(object):
 			item_feats_emb = torch.cat([item_feats_emb, kg_emb], dim=-1)  # (batch, feature_num, emb_size + kg_emb_size)
 
 		# user embedding
-		user_feats_emb = torch.stack([self.embedding_dict[f](feed_dict[f]) if f.endswith('_c') or f.endswith('_id')
+		user_feats_emb = torch.stack([self.embedding_dict[f](feed_dict[f]) if f.endswith('_c') or f.endswith('_id') or f in ['skill_level', 'best_sport']
 					else self.embedding_dict[f](feed_dict[f].float().unsqueeze(-1))
 					for f in self.user_context],dim=-2) # batch * feature num * emb size
 		# situation embedding
@@ -177,10 +202,10 @@ class DINBase(object):
 
 		if merge_all:
 			item_num = item_feats_emb.shape[1]  # Number of items
-			feature_dim = item_feats_emb.shape[2]  # Number of features per item
-			emb_size = item_feats_emb.shape[-1]  # Embedding size (includes KG if use_kg)
-
 			if self.use_kg:
+				feature_dim = item_feats_emb.shape[2]  # Number of features per item
+				emb_size = item_feats_emb.shape[-1]  # Embedding size (includes KG if use_kg)
+
 				# ✅ Properly expand user_feats_emb to match item_num
 				user_feats_emb = user_feats_emb.unsqueeze(1).repeat(1, item_num, 1, 1)  # (batch, item_num, user_feature_num, emb_size)
 
@@ -222,24 +247,31 @@ class DINBase(object):
 			return history_emb, current_emb, user_feats_emb, situ_feats_emb
 
 	def forward(self, feed_dict):
+		# Dynamically add skill_level and best_sport to feed_dict
+		feed_dict = self.preprocess_feed_dict(feed_dict)
+
 		hislens = feed_dict['lengths']
 		history_emb, current_emb, all_context = self.get_all_embedding(feed_dict)
-		# Ensure history_emb and current_emb match expected dimensions
-		batch_size, item_num, current_emb_dim = current_emb.shape
-		_, max_len, history_emb_dim = history_emb.shape
+		if self.use_kg:
+			# Ensure history_emb and current_emb match expected dimensions
+			batch_size, item_num, current_emb_dim = current_emb.shape
+			_, max_len, history_emb_dim = history_emb.shape
 
-		# Flatten current_emb for att_dnn compatibility
-		current_emb2d = current_emb.view(batch_size * item_num, current_emb_dim)
-		history_emb2d = history_emb.unsqueeze(1).repeat(1, item_num, 1, 1).view(batch_size * item_num, max_len, history_emb_dim)
-		hislens2d = hislens.unsqueeze(1).repeat(1, item_num).view(-1)
+			# Flatten current_emb for att_dnn compatibility
+			current_emb2d = current_emb.view(batch_size * item_num, current_emb_dim)
+			history_emb2d = history_emb.unsqueeze(1).repeat(1, item_num, 1, 1).view(batch_size * item_num, max_len, history_emb_dim)
+			hislens2d = hislens.unsqueeze(1).repeat(1, item_num).view(-1)
 
-		# Ensure all_context matches flattened dimensions
-		all_context2d = all_context.view(batch_size * item_num, -1)
+			# Ensure all_context matches flattened dimensions
+			all_context2d = all_context.view(batch_size * item_num, -1)
 
-		predictions = self.att_dnn(current_emb2d, history_emb2d, all_context2d, hislens2d)
-		return {'prediction': predictions.view(batch_size, item_num)}
+			predictions = self.att_dnn_kg(current_emb2d, history_emb2d, all_context2d, hislens2d)
+			return {'prediction': predictions.view(batch_size, item_num)}
+		else:
+			predictions = self.att_dnn(current_emb,history_emb, all_context, hislens)
+			return {'prediction':predictions}
 
-	def att_dnn(self, current_emb2d, history_emb2d, all_context2d, history_lengths):
+	def att_dnn_kg(self, current_emb2d, history_emb2d, all_context2d, history_lengths):
 		mask_mat = (torch.arange(history_emb2d.shape[1]).view(1, -1)).to(self.device)
 
 		# Ensure dimensions match for attention
@@ -275,6 +307,19 @@ class DINBase(object):
 		item_num = batch_item_num // batch_size
 		return din_output.squeeze(dim=-1).view(batch_size, item_num)
 
+	def att_dnn(self, current_emb, history_emb, all_context, history_lengths):
+		mask_mat = (torch.arange(history_emb.shape[1]).view(1,-1)).to(self.device)
+  
+		batch_size, item_num, feats_emb = current_emb.shape
+		_, max_len, his_emb = history_emb.shape
+		current_emb2d = current_emb.view(-1, feats_emb) # transfer 3d (batch * candidate * emb) to 2d ((batch*candidate)*emb) 
+		history_emb2d = history_emb.unsqueeze(1).repeat(1,item_num,1,1).view(-1,max_len,his_emb)
+		hislens2d = history_lengths.unsqueeze(1).repeat(1,item_num).view(-1)
+		user_his_emb2d = self.attention(current_emb2d, history_emb2d, hislens2d,mask_mat,softmax_stag=False)
+  
+		din_output = torch.cat([user_his_emb2d, user_his_emb2d*current_emb2d, all_context.view(batch_size*item_num,-1) ],dim=-1)
+		din_output = self.dnn_mlp_layers(din_output)
+		return din_output.squeeze(dim=-1).view(batch_size, item_num)
 
 class DINCTR(ContextSeqCTRModel, DINBase):
 	reader = 'ContextSeqReader'
