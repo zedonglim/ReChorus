@@ -184,27 +184,29 @@ class BaseRunner(object):
 		for batch in tqdm(dl, leave=False, desc='Epoch {:<3}'.format(epoch), ncols=100, mininterval=1):
 			batch = utils.batch_to_gpu(batch, model.device)
 
-			# randomly shuffle the items to avoid models remembering the first item being the target
+			# Randomly shuffle the items to avoid models remembering the first item being the target
 			item_ids = batch['item_id']
-			# for each row (sample), get random indices and shuffle the original items
-			indices = torch.argsort(torch.rand(*item_ids.shape), dim=-1)						
-			batch['item_id'] = item_ids[torch.arange(item_ids.shape[0]).unsqueeze(-1), indices]
+			batch_size, item_count = item_ids.shape  # Ensure dimensions are tracked
+			indices = torch.argsort(torch.rand(batch_size, item_count), dim=-1)
+			batch['item_id'] = item_ids[torch.arange(batch_size).unsqueeze(-1), indices]
 
 			model.optimizer.zero_grad()
 			out_dict = model(batch)
 
-			# shuffle the predictions back so that the prediction scores match the original order (first item is the target)
+			# Shuffle the predictions back to match the original order
 			prediction = out_dict['prediction']
-			if len(prediction.shape)==2: # only for ranking tasks
-				restored_prediction = torch.zeros(*prediction.shape).to(prediction.device)
-				# use the random indices to shuffle back
-				restored_prediction[torch.arange(item_ids.shape[0]).unsqueeze(-1), indices] = prediction   
+			if len(prediction.shape) == 2:  # Only for ranking tasks
+				restored_prediction = torch.zeros_like(prediction)
+				for i in range(batch_size):
+					original_order = torch.argsort(indices[i])  # Restore original order
+					restored_prediction[i, :item_count] = prediction[i, original_order]  # Reshuffle predictions
 				out_dict['prediction'] = restored_prediction
 
 			loss = model.loss(out_dict)
 			loss.backward()
 			model.optimizer.step()
 			loss_lst.append(loss.detach().cpu().data.numpy())
+
 		return np.mean(loss_lst).item()
 
 	def eval_termination(self, criterion: List[float]) -> bool:
