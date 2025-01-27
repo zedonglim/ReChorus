@@ -23,6 +23,10 @@ class WideDeepBase(FMBase):
 							help='Size of embedding vectors.')
 		parser.add_argument('--layers', type=str, default='[64]',
 							help="Size of each layer.")
+		parser.add_argument('--use_kg', type=int, default=0,
+                            help='Whether to include KG embeddings (0: No, 1: Yes).')
+		parser.add_argument('--normalize_embeddings', type=int, default=1,
+                            help='Whether to normalize embeddings (0: No, 1: Yes).')
 		return parser
 
 	def _define_init(self, args, corpus):
@@ -35,19 +39,44 @@ class WideDeepBase(FMBase):
 		self._define_params_FM()
 		pre_size = len(self.context_features) * self.vec_size
 		# deep layers
-		self.deep_layers = MLP_Block(pre_size, self.layers, hidden_activations="ReLU",
+		# With KG
+		self.deep_layers = MLP_Block(5248, self.layers, hidden_activations="ReLU",
 							   batch_norm=False, dropout_rates=self.dropout, output_dim=1)
+		# Without KG
+		# self.deep_layers = MLP_Block(5184, self.layers, hidden_activations="ReLU",
+		# 					   batch_norm=False, dropout_rates=self.dropout, output_dim=1)
+	
+	def preprocess_feed_dict(self, feed_dict):
+		"""Dynamically add skill_level and KG embeddings to feed_dict."""
+		# Add skill level
+		feed_dict['skill_level'] = torch.tensor(
+			[self.user_skill_mapping[user_id]['skill_level'] if user_id in self.user_skill_mapping else 0
+				for user_id in feed_dict['user_id']],
+			dtype=torch.long,
+			device=self.device
+		)
+
+		# Handle KG embeddings
+		if self.use_kg:
+			valid_item_ids = feed_dict['item_id'].long()
+			kg_embeddings = self.kg_embeddings(valid_item_ids)
+			feed_dict['kg_embeddings'] = kg_embeddings
+
+		return feed_dict
 	
 	def forward(self, feed_dict):
+		feed_dict = self.preprocess_feed_dict(feed_dict)
 		deep_vectors, wide_prediction = self._get_embeddings_FM(feed_dict)
-		deep_vector = deep_vectors.flatten(start_dim=-2)
+		deep_vector = deep_vectors.sum(dim=1)
+		batch_size, num_features, feature_dim = deep_vector.shape
+		deep_vector = deep_vector.view(batch_size, num_features * feature_dim)  # Flatten to [batch_size, num_features * feature_dim]
 		deep_prediction = self.deep_layers(deep_vector).squeeze(dim=-1)
-		predictions = deep_prediction + wide_prediction
+		predictions = deep_prediction.unsqueeze(1) + wide_prediction
 		return {'prediction':predictions}
 		
 class WideDeepCTR(ContextCTRModel, WideDeepBase):
 	reader, runner = 'ContextReader', 'CTRRunner'
-	extra_log_args = ['emb_size','layers','loss_n']
+	extra_log_args = ['emb_size','layers','loss_n', 'use_kg', 'normalize_embeddings']
 	@staticmethod
 	def parse_model_args(parser):
 		parser = WideDeepBase.parse_model_args_WD(parser)
@@ -65,7 +94,7 @@ class WideDeepCTR(ContextCTRModel, WideDeepBase):
 
 class WideDeepTopK(ContextModel,WideDeepBase):
 	reader, runner = 'ContextReader','BaseRunner'
-	extra_log_args = ['emb_size','layers','loss_n']
+	extra_log_args = ['emb_size','layers','loss_n', 'use_kg', 'normalize_embeddings']
 
 	@staticmethod
 	def parse_model_args(parser):
