@@ -30,6 +30,8 @@ class DINBase(object):
 							help="Size of each layer in the MLP module.")
 		parser.add_argument('--use_kg', type=int, default=0,
                         	help='Whether to include knowledge graph embeddings (0: No, 1: Yes).')
+		parser.add_argument('--include_skill_level', type=int, default=1,
+                        	help='Whether to include skill level (0: No, 1: Yes).')
 		return parser
 
 	def _define_init(self, args,corpus):
@@ -44,8 +46,10 @@ class DINBase(object):
 		self.att_layers = eval(args.att_layers)
 		self.dnn_layers = eval(args.dnn_layers)
 		self.use_kg = args.use_kg
+		self.include_skill_level = args.include_skill_level
 
-		self._load_user_skill_level()
+		if self.include_skill_level:
+			self._load_user_skill_level()
 
 		if self.use_kg:
 			self._load_kg_embeddings()
@@ -248,7 +252,8 @@ class DINBase(object):
 
 	def forward(self, feed_dict):
 		# Dynamically add skill_level and best_sport to feed_dict
-		feed_dict = self.preprocess_feed_dict(feed_dict)
+		if self.include_skill_level:
+			feed_dict = self.preprocess_feed_dict(feed_dict)
 
 		hislens = feed_dict['lengths']
 		history_emb, current_emb, all_context = self.get_all_embedding(feed_dict)
